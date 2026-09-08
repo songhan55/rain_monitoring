@@ -80,7 +80,7 @@
 
         <!-- 프리셋 지역 선택 -->
         <div class="mb-3">
-          <label class="block text-xs text-slate-400 mb-1">권역 선택 (Bounding Box)</label>
+          <label class="block text-xs text-slate-400 mb-1">1단계: 권역 선택</label>
           <select id="select-preset" onchange="changePreset()" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
             <option value="yongin_seoul">수도권 (용인서울·경부·판교 권역)</option>
             <option value="seoul_gangnam">서울 강남 / 올림픽대로 권역</option>
@@ -89,15 +89,23 @@
           </select>
         </div>
 
+        <!-- 2단계: 도로/노선별 그룹 필터 -->
+        <div class="mb-3">
+          <label class="block text-xs text-slate-400 mb-1">2단계: 도로 / 노선별 분류</label>
+          <select id="select-route" onchange="filterCctvList()" class="w-full bg-slate-950 border border-cyan-800/80 rounded-lg px-3 py-2 text-sm text-cyan-300 font-semibold focus:outline-none focus:border-cyan-400">
+            <option value="all">🛣️ 전체 노선 보기</option>
+          </select>
+        </div>
+
         <!-- CCTV 검색 입력 -->
         <div class="mb-3">
-          <label class="block text-xs text-slate-400 mb-1">CCTV 검색 (이름 필터)</label>
-          <input type="text" id="input-search" oninput="filterCctvList()" placeholder="예: 고기터널, 판교, 서분당..." class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 placeholder-slate-600">
+          <label class="block text-xs text-slate-400 mb-1">CCTV 검색 (세부 지점명)</label>
+          <input type="text" id="input-search" oninput="filterCctvList()" placeholder="예: 고기터널, 판교, 서분당, 양재..." class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 placeholder-slate-600">
         </div>
 
         <!-- CCTV 드롭다운 목록 -->
         <div class="mb-4">
-          <label class="block text-xs text-slate-400 mb-1">모니터링 대상 CCTV</label>
+          <label class="block text-xs text-slate-400 mb-1">3단계: 모니터링 대상 CCTV 선택</label>
           <select id="select-cctv" onchange="selectCctv()" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 font-medium focus:outline-none focus:border-cyan-500">
             <option value="">CCTV를 불러오는 중...</option>
           </select>
@@ -353,41 +361,98 @@
       setTimeout(() => { if (map) map.invalidateSize(); }, 300);
     }
 
-    // 프리셋 선택 시 CCTV 목록 갱신
+    // CCTV 이름에서 도로/노선명 추출 함수
+    function extractRoute(cctvname) {
+      const m = cctvname.match(/\[(.*?)\]/);
+      return m ? m[1].trim() : '일반국도/기타';
+    }
+
+    // CCTV 이름에서 대괄호 제거한 순수 지점명 추출 함수
+    function cleanPointName(cctvname) {
+      return cctvname.replace(/\[.*?\]\s*/, '').trim() || cctvname;
+    }
+
+    // 프리셋 선택 시 CCTV 목록 갱신 및 도로/노선별 목록 생성
     async function changePreset() {
       const preset = document.getElementById('select-preset').value;
       const res = await fetch(`/api/cctvs?preset=${preset}`);
       allCctvs = await res.json();
-      renderCctvDropdown(allCctvs);
+
+      // 노선/도로별 개수 집계 및 드롭다운 생성
+      const routeCounts = {};
+      allCctvs.forEach(c => {
+        const r = extractRoute(c.cctvname);
+        routeCounts[r] = (routeCounts[r] || 0) + 1;
+      });
+
+      const routeSelect = document.getElementById('select-route');
+      routeSelect.innerHTML = `<option value="all">🛣️ 전체 노선 보기 (${allCctvs.length}개 지점)</option>`;
+      
+      // 개수 많은 순으로 노선 정렬
+      Object.entries(routeCounts)
+        .sort((a, b) => b[1] - a[1])
+        .forEach(([route, count]) => {
+          const opt = document.createElement('option');
+          opt.value = route;
+          opt.innerText = `🛣️ [${route}] (${count}개 CCTV)`;
+          routeSelect.appendChild(opt);
+        });
+
+      // 1단계 선택 후 CCTV 목록 필터링 실행
+      filterCctvList();
     }
 
-    // CCTV 드롭다운 렌더링
-    function renderCctvDropdown(cctvs) {
+    // 노선 필터 및 검색어 필터링 후 optgroup으로 깔끔하게 묶어서 렌더링
+    function filterCctvList() {
+      const selectedRoute = document.getElementById('select-route').value;
+      const query = document.getElementById('input-search').value.toLowerCase().trim();
+
+      // 원본 인덱스를 보존하면서 필터링
+      let filtered = allCctvs.map((c, originalIdx) => ({ ...c, originalIdx }));
+
+      if (selectedRoute !== 'all') {
+        filtered = filtered.filter(c => extractRoute(c.cctvname) === selectedRoute);
+      }
+
+      if (query) {
+        filtered = filtered.filter(c => c.cctvname.toLowerCase().includes(query));
+      }
+
       const select = document.getElementById('select-cctv');
       select.innerHTML = '';
-      document.getElementById('cctv-count-badge').innerText = `${cctvs.length}개 검색됨`;
+      document.getElementById('cctv-count-badge').innerText = `${filtered.length}개 표시중`;
 
-      if (cctvs.length === 0) {
-        select.innerHTML = '<option value="">해당 권역에 CCTV가 없습니다</option>';
+      if (filtered.length === 0) {
+        select.innerHTML = '<option value="">선택한 조건에 해당하는 CCTV가 없습니다</option>';
         return;
       }
 
-      cctvs.forEach((c, idx) => {
-        const opt = document.createElement('option');
-        opt.value = idx;
-        opt.innerText = `${c.cctvname}`;
-        select.appendChild(opt);
+      // 도로/노선별 그룹화 (optgroup)
+      const groups = {};
+      filtered.forEach(item => {
+        const r = extractRoute(item.cctvname);
+        if (!groups[r]) groups[r] = [];
+        groups[r].push(item);
+      });
+
+      Object.entries(groups).forEach(([route, items]) => {
+        const optGroup = document.createElement('optgroup');
+        optGroup.label = `🛣️ ${route} (${items.length}개)`;
+        optGroup.className = "bg-slate-900 text-cyan-400 font-bold";
+
+        items.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c.originalIdx;
+          opt.innerText = `${cleanPointName(c.cctvname)}`;
+          opt.className = "bg-slate-950 text-slate-100 font-normal";
+          optGroup.appendChild(opt);
+        });
+
+        select.appendChild(optGroup);
       });
 
       select.selectedIndex = 0;
       selectCctv();
-    }
-
-    // 이름 검색 필터링
-    function filterCctvList() {
-      const query = document.getElementById('input-search').value.toLowerCase();
-      const filtered = allCctvs.filter(c => c.cctvname.toLowerCase().includes(query));
-      renderCctvDropdown(filtered);
     }
 
     // 특정 CCTV 선택 시 스트림 재생
