@@ -122,36 +122,37 @@ def generate_frames(stream_url: str, cctv_name: str):
 
     frame_counter = 0
     sim_phase = 0
+    last_boxes = []
+    latency_ms = 35
 
     while True:
         ret, frame = cap.read()
         if not ret:
-            # 스트림 일시 중단 시 잠시 대기 후 재연결 시도
-            time.sleep(0.1)
+            time.sleep(0.05)
             continue
 
         frame_counter += 1
         h, w, _ = frame.shape
 
-        start_time = time.time()
-
-        # 1. YOLOv8 추론
-        results = yolo_model(frame, conf=global_state["conf_threshold"], verbose=False)[0]
-        latency_ms = int((time.time() - start_time) * 1000)
-        global_state["latency"] = latency_ms
+        # 3프레임마다 1번만 YOLO 추론 수행 (CPU 환경 15~20 FPS 부드러운 재생 유지)
+        if frame_counter % 3 == 0:
+            start_time = time.time()
+            results = yolo_model(frame, conf=global_state["conf_threshold"], verbose=False)[0]
+            latency_ms = int((time.time() - start_time) * 1000)
+            global_state["latency"] = latency_ms
+            last_boxes = results.boxes
 
         vehicle_count = 0
         pothole_count = 0
         flooding_count = 0
 
-        # 2. 검출된 일반 객체 렌더링 (차량, 트럭, 버스 등)
-        for box in results.boxes:
+        # 2. 검출된 객체 렌더링 (차량, 트럭, 버스 등)
+        for box in last_boxes:
             cls_id = int(box.cls[0])
             cls_name = yolo_model.names[cls_id]
             conf = float(box.conf[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
 
-            # 커스텀 모델인 경우 포트홀/침수 감지
             if "pothole" in cls_name.lower():
                 pothole_count += 1
                 draw_pothole_box(frame, x1, y1, x2, y2, conf)
@@ -160,7 +161,6 @@ def generate_frames(stream_url: str, cctv_name: str):
                 draw_flood_polygon(frame, [(x1, y1), (x2, y1), (x2, y2), (x1, y2)], conf)
             elif cls_name in ["car", "truck", "bus", "motorcycle"]:
                 vehicle_count += 1
-                # 차량 바운딩 박스 (에메랄드/그린 계열)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (16, 185, 129), 2)
                 label = f"{cls_name} {int(conf*100)}%"
                 cv2.putText(frame, label, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (16, 185, 129), 1)

@@ -344,12 +344,13 @@
     let map = null;
     let mapMarker = null;
 
-    // Leaflet 지도 초기화
+    // Leaflet 지도 초기화 (완전 무료 OpenStreetMap / CartoDB 타일 - 별도 API 키 불필요)
     function initMap() {
       map = L.map('mini-map', { zoomControl: false }).setView([37.35, 127.06], 13);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
         attribution: '&copy; OpenStreetMap'
       }).addTo(map);
+      setTimeout(() => { if (map) map.invalidateSize(); }, 300);
     }
 
     // 프리셋 선택 시 CCTV 목록 갱신
@@ -407,6 +408,7 @@
         const lat = parseFloat(currentCctv.coordy);
         const lon = parseFloat(currentCctv.coordx);
         map.setView([lat, lon], 14);
+        map.invalidateSize();
         if (mapMarker) map.removeLayer(mapMarker);
         mapMarker = L.circleMarker([lat, lon], {
           radius: 8,
@@ -432,7 +434,14 @@
       const cctvName = encodeURIComponent(currentCctv.cctvname);
       img.src = `/video_feed?url=${encodedUrl}&name=${cctvName}&t=${Date.now()}`;
 
-      img.onload = () => spinner.classList.add('hidden');
+      // MJPEG 멀티파트 스트림은 브라우저에서 onload 이벤트가 트리거되지 않으므로 일정 시간 후 로딩창 자동 해제
+      setTimeout(() => {
+        spinner.classList.add('hidden');
+      }, 700);
+
+      img.onerror = () => {
+        console.warn("Stream connection failed, retrying...");
+      };
     }
 
     // 신뢰도 임계값 조절
