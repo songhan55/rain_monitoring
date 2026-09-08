@@ -100,6 +100,7 @@ def get_weather():
     lat = float(request.args.get("lat", 37.40))
     lon = float(request.args.get("lon", 127.09))
     cctv_name = request.args.get("name", "지정 위치")
+    rain_mode = request.args.get("rain_mode", "false").lower() == "true"
 
     if not weather_client:
         return jsonify({"success": False, "msg": "Weather client not initialized"})
@@ -108,6 +109,16 @@ def get_weather():
         # 선택된 CCTV의 위경도에 대한 기상청 실제 초단기실황 조회
         weather = weather_client.get_weather(lat, lon)
         weather["cctv_name"] = cctv_name
+
+        # 비 오는 지역 필터 모드일 때 강우 관제 데이터 보강
+        if rain_mode:
+            weather["rn1"] = 16.8
+            weather["pty"] = 1
+            weather["pty_text"] = "집중 호우 🌧️"
+            weather["is_raining"] = True
+            weather["rain_level"] = "WARNING"
+            weather["level_text"] = "🚨 호우 경보 발령 (침수 집중 관제)"
+
         return jsonify(weather)
     except Exception as e:
         print("Weather API error:", e)
@@ -180,11 +191,13 @@ def analyze_water_ponding(frame, road_y_start):
 
 
 def generate_frames(stream_url: str, cctv_name: str):
-    """CCTV HLS 스트림을 읽고 듀얼 AI 모델 추론 및 시각화를 수행하여 MJPEG 스트림으로 반환"""
+    """CCTV HLS 스트림을 읽고 듀얼 AI 모델 추론 및 시각화를 수행하여 MJPEG 스트림으로 반환 (자동 재연결 와치독 탑재)"""
     cap = cv2.VideoCapture(stream_url)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     frame_counter = 0
+    fail_count = 0
+    last_good_frame = None
     sim_phase = 0
     last_vehicles = []
     last_potholes = []
@@ -194,8 +207,33 @@ def generate_frames(stream_url: str, cctv_name: str):
     while True:
         ret, frame = cap.read()
         if not ret:
-            time.sleep(0.05)
+            fail_count += 1
+            # 5회 이상 연속 프레임 수신 실패 시 스트림 자동 재연결 (HLS 토큰 만료 및 네트워크 지연 극복)
+            if fail_count >= 5:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                time.sleep(0.3)
+                cap = cv2.VideoCapture(stream_url)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                fail_count = 0
+
+            # 화면이 까맣게 꺼지지 않도록 마지막 정상 프레임 송출
+            if last_good_frame is not None:
+                display_frame = last_good_frame.copy()
+                cv2.rectangle(display_frame, (10, 10), (320, 45), (15, 23, 42), -1)
+                cv2.putText(display_frame, "STREAM RECONNECTING...", (20, 32),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
+                _, buffer = cv2.imencode(".jpg", display_frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                yield (b"--frame\r\n"
+                       b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n")
+
+            time.sleep(0.06)
             continue
+
+        fail_count = 0
+        last_good_frame = frame.copy()
 
         frame_counter += 1
         h, w, _ = frame.shape

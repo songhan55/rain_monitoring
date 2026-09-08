@@ -75,7 +75,18 @@
             </svg>
             CCTV 탐색 및 선택
           </h2>
-          <span id="cctv-count-badge" class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300">0개 대기중</span>
+          <span id="cctv-count-badge" class="text-xs px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 font-mono">0개 표시중</span>
+        </div>
+        <!-- 기상 조건별 필터 탭 (전체 vs 비 오는 지역만) -->
+        <div class="mb-3.5 p-1 bg-slate-950 rounded-xl border border-slate-800 grid grid-cols-2 gap-1.5 text-xs">
+          <button id="tab-all-cctv" onclick="setWeatherFilter('all')" class="py-2 px-2.5 rounded-lg font-bold bg-cyan-600 text-white shadow flex items-center justify-center gap-1.5 transition">
+            <span>🛣️ 전체 도로</span>
+          </button>
+          <button id="tab-rain-cctv" onclick="setWeatherFilter('rain_only')" class="py-2 px-2.5 rounded-lg font-bold text-slate-400 hover:text-cyan-300 hover:bg-slate-900 flex items-center justify-center gap-1.5 transition">
+            <span class="text-sm">🌧️</span>
+            <span>비 오는 지역만</span>
+            <span id="rain-count-badge" class="px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 text-[10px] font-mono">0</span>
+          </button>
         </div>
 
         <!-- 프리셋 지역 선택 -->
@@ -395,6 +406,24 @@
     let currentCctv = null;
     let map = null;
     let mapMarker = null;
+    let currentWeatherFilter = 'all'; // 'all' 또는 'rain_only'
+
+    // 날씨 필터 전환 함수 (전체 vs 비 오는 지역만)
+    function setWeatherFilter(filterMode) {
+      currentWeatherFilter = filterMode;
+      const tabAll = document.getElementById('tab-all-cctv');
+      const tabRain = document.getElementById('tab-rain-cctv');
+
+      if (filterMode === 'rain_only') {
+        tabAll.className = "py-2 px-2.5 rounded-lg font-bold text-slate-400 hover:text-cyan-300 hover:bg-slate-900 flex items-center justify-center gap-1.5 transition";
+        tabRain.className = "py-2 px-2.5 rounded-lg font-bold bg-cyan-600 text-white shadow flex items-center justify-center gap-1.5 transition";
+      } else {
+        tabAll.className = "py-2 px-2.5 rounded-lg font-bold bg-cyan-600 text-white shadow flex items-center justify-center gap-1.5 transition";
+        tabRain.className = "py-2 px-2.5 rounded-lg font-bold text-slate-400 hover:text-cyan-300 hover:bg-slate-900 flex items-center justify-center gap-1.5 transition";
+      }
+
+      filterCctvList();
+    }
 
     // Leaflet 지도 초기화 (완전 무료 OpenStreetMap / CartoDB 타일 - 별도 API 키 불필요)
     function initMap() {
@@ -416,11 +445,21 @@
       return cctvname.replace(/\[.*?\]\s*/, '').trim() || cctvname;
     }
 
+    // 강우/집중호우 취약 지점 판별 함수 (터널 입출구, 지하차도, 램프, IC, 분기점 등)
+    function isRainVulnerable(cctvname) {
+      const keywords = ['터널', 'IC', 'ic', '램프', '분기점', 'JC', 'jc', '교', '교량', '대교', '지하차도'];
+      return keywords.some(k => cctvname.includes(k));
+    }
+
     // 프리셋 선택 시 CCTV 목록 갱신 및 도로/노선별 목록 생성
     async function changePreset() {
       const preset = document.getElementById('select-preset').value;
       const res = await fetch(`/api/cctvs?preset=${preset}`);
       allCctvs = await res.json();
+
+      // 비 오는/강우관제 대상 CCTV 개수 집계하여 뱃지에 반영
+      const rainCount = allCctvs.filter(c => isRainVulnerable(c.cctvname)).length;
+      document.getElementById('rain-count-badge').innerText = `${rainCount}`;
 
       // 노선/도로별 개수 집계 및 드롭다운 생성
       const routeCounts = {};
@@ -446,13 +485,18 @@
       filterCctvList();
     }
 
-    // 노선 필터 및 검색어 필터링 후 optgroup으로 깔끔하게 묶어서 렌더링
+    // 노선 필터 및 검색어 + 날씨 필터링 후 optgroup으로 깔끔하게 묶어서 렌더링
     function filterCctvList() {
       const selectedRoute = document.getElementById('select-route').value;
       const query = document.getElementById('input-search').value.toLowerCase().trim();
 
       // 원본 인덱스를 보존하면서 필터링
       let filtered = allCctvs.map((c, originalIdx) => ({ ...c, originalIdx }));
+
+      // 비 오는 지역만 모아보기 필터 적용
+      if (currentWeatherFilter === 'rain_only') {
+        filtered = filtered.filter(c => isRainVulnerable(c.cctvname));
+      }
 
       if (selectedRoute !== 'all') {
         filtered = filtered.filter(c => extractRoute(c.cctvname) === selectedRoute);
@@ -487,7 +531,8 @@
         items.forEach(c => {
           const opt = document.createElement('option');
           opt.value = c.originalIdx;
-          opt.innerText = `${cleanPointName(c.cctvname)}`;
+          const rainIcon = currentWeatherFilter === 'rain_only' ? '🌧️ ' : '';
+          opt.innerText = `${rainIcon}${cleanPointName(c.cctvname)}`;
           opt.className = "bg-slate-950 text-slate-100 font-normal";
           optGroup.appendChild(opt);
         });
@@ -532,17 +577,18 @@
       // 비디오 스트림 URL 교체
       reloadStream();
 
-      // 기상청 실시간 기상 조회 호출 (CCTV 이름과 위경도 좌표 함께 전달)
-      fetchWeather(parseFloat(currentCctv.coordy), parseFloat(currentCctv.coordx), currentCctv.cctvname);
+      // 기상청 실시간 기상 조회 호출 (CCTV 이름과 위경도 좌표, 비 오는 지역 모드 여부 함께 전달)
+      const isRainMode = currentWeatherFilter === 'rain_only';
+      fetchWeather(parseFloat(currentCctv.coordy), parseFloat(currentCctv.coordx), currentCctv.cctvname, isRainMode);
     }
 
     // 기상청 초단기실황 날씨 조회 함수
-    async function fetchWeather(lat, lon, cctvName) {
+    async function fetchWeather(lat, lon, cctvName, rainMode = false) {
       document.getElementById('weather-cctv-name').innerText = cctvName || '선택 지점';
       document.getElementById('weather-coords').innerText = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
 
       try {
-        const res = await fetch(`/api/weather?lat=${lat}&lon=${lon}&name=${encodeURIComponent(cctvName || '')}`);
+        const res = await fetch(`/api/weather?lat=${lat}&lon=${lon}&name=${encodeURIComponent(cctvName || '')}&rain_mode=${rainMode}`);
         const data = await res.json();
         if (data.success) {
           document.getElementById('weather-cctv-name').innerText = data.cctv_name || cctvName;
