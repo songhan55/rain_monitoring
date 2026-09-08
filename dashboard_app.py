@@ -28,25 +28,31 @@ try:
     print("🌤️ 기상청 API 클라이언트 초기화 완료")
 except Exception as e:
     weather_client = None
-    print("⚠️ 기상청 클라이언트 초기화 오류:", e)
+# 1. 일반 교통/차량 탐지 모델 (YOLOv8n)
+print("📦 차량 탐지 모델 로드 중: yolov8n.pt")
+yolo_traffic = YOLO("yolov8n.pt")
 
-# YOLO 모델 로드 (커스텀 가중치 우선 검색)
-CUSTOM_WEIGHTS = "best.pt"
-MODEL_PATH = CUSTOM_WEIGHTS if os.path.exists(CUSTOM_WEIGHTS) else "yolov8n.pt"
-print(f"📦 YOLO 모델 로드 중: {MODEL_PATH}")
-yolo_model = YOLO(MODEL_PATH)
+# 2. 전문 도로 포트홀 세그멘테이션 모델 (HuggingFace Pothole Segmentation)
+POTHOLE_WEIGHTS = "pothole_best.pt"
+if os.path.exists(POTHOLE_WEIGHTS):
+    print(f"🎯 도로 포트홀 전문 세그멘테이션 모델 로드 완료: {POTHOLE_WEIGHTS}")
+    yolo_pothole = YOLO(POTHOLE_WEIGHTS)
+else:
+    print("⚠️ pothole_best.pt 가 없어 기본 모델을 사용합니다.")
+    yolo_pothole = yolo_traffic
 
 # 전역 관제 상태
 global_state = {
-    "conf_threshold": 0.35,
-    "simulation_mode": True,  # 데모 위험(포트홀/침수) 주입 모드
+    "conf_threshold": 0.25,
+    "simulation_mode": False,  # 실제 AI 탐지 모드 기본 활성화 (무조건적 데모 박스 제거)
     "potholes": 0,
     "floodings": 0,
     "vehicles": 0,
     "latency": 0,
     "events": [],
     "active_cctv_url": None,
-    "active_cctv_name": "연결 대기중"
+    "active_cctv_name": "연결 대기중",
+    "tracked_potholes": {}     # 시간적 일관성 추적용 히스토리
 }
 
 # 권역별 위경도 Bounding Box 프리셋
@@ -141,14 +147,48 @@ def clear_logs():
     return jsonify({"success": True})
 
 
+def analyze_water_ponding(frame, road_y_start):
+    """
+    컴퓨터 비전 기반 도로 수막 및 물웅덩이(Water Ponding/Flooding) 분석
+    비가 오거나 노면이 젖었을 때 발생하는 거울형 반사광(Specular Glare) 및 차선 소실 영역 탐지
+    """
+    h, w, _ = frame.shape
+    road_roi = frame[road_y_start:h, 0:w]
+
+    # HSV 색공간 변환: 물웅덩이는 낮은 채도(S)와 높은 반사광(V)을 가짐
+    hsv = cv2.cvtColor(road_roi, cv2.COLOR_BGR2HSV)
+    s_channel = hsv[:, :, 1]
+    v_channel = hsv[:, :, 2]
+
+    # 물 표면 반사광 및 수막 마스크 (낮은 채도 + 강한 반사)
+    water_mask = cv2.inRange(s_channel, 0, 45) & cv2.inRange(v_channel, 215, 255)
+
+    # 모폴로지 연산으로 노이즈 필터링
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    water_mask = cv2.morphologyEx(water_mask, cv2.MORPH_OPEN, kernel)
+    water_mask = cv2.morphologyEx(water_mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(water_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    detected_puddles = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        # 1,500픽셀 이상 대형 수막 영역만 실제 침수 후보로 선정
+        if 1500 < area < (w * (h - road_y_start) * 0.35):
+            cnt_adjusted = cnt + np.array([0, road_y_start])
+            detected_puddles.append(cnt_adjusted)
+    return detected_puddles
+
+
 def generate_frames(stream_url: str, cctv_name: str):
-    """CCTV HLS 스트림을 읽고 YOLO 추론 및 시각화를 수행하여 MJPEG 스트림으로 반환"""
+    """CCTV HLS 스트림을 읽고 듀얼 AI 모델 추론 및 시각화를 수행하여 MJPEG 스트림으로 반환"""
     cap = cv2.VideoCapture(stream_url)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     frame_counter = 0
     sim_phase = 0
-    last_boxes = []
+    last_vehicles = []
+    last_potholes = []
+    last_floods = []
     latency_ms = 35
 
     while True:
@@ -159,78 +199,118 @@ def generate_frames(stream_url: str, cctv_name: str):
 
         frame_counter += 1
         h, w, _ = frame.shape
+        road_y_start = int(h * 0.40)  # 화면 하단 60% 도로 ROI
 
-        # 3프레임마다 1번만 YOLO 추론 수행 (CPU 환경 15~20 FPS 부드러운 재생 유지)
+        # 3프레임마다 1번만 AI 추론 수행 (부드러운 FPS 유지)
         if frame_counter % 3 == 0:
             start_time = time.time()
-            results = yolo_model(frame, conf=global_state["conf_threshold"], verbose=False)[0]
+
+            # 1. 차량 통행량 감지 (YOLOv8n)
+            traffic_res = yolo_traffic(frame, conf=0.35, verbose=False)[0]
+            last_vehicles = [
+                (map(int, box.xyxy[0].tolist()), float(box.conf[0]), yolo_traffic.names[int(box.cls[0])])
+                for box in traffic_res.boxes
+                if yolo_traffic.names[int(box.cls[0])] in ["car", "truck", "bus", "motorcycle"]
+            ]
+
+            # 2. 실제 포트홀 전문 세그멘테이션 추론 (pothole_best.pt)
+            pothole_res = yolo_pothole(frame, conf=global_state["conf_threshold"], verbose=False)[0]
+            current_pothole_candidates = []
+            if pothole_res.boxes is not None and len(pothole_res.boxes) > 0:
+                for box in pothole_res.boxes:
+                    conf = float(box.conf[0])
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                    # 도로 하단 영역에 위치하는지 검증
+                    if y2 > road_y_start:
+                        current_pothole_candidates.append((x1, y1, x2, y2, conf))
+
+            # 3. 시간적 연속성 필터링 (Temporal Consistency Filter)
+            # 도로 노면 파손은 고정되어 있으므로, 동일 좌표 영역에서 2프레임 이상 유지될 때만 확정
+            validated_potholes = []
+            tracker = global_state["tracked_potholes"]
+            current_keys = set()
+
+            for (x1, y1, x2, y2, conf) in current_pothole_candidates:
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                key = f"{cx // 30}_{cy // 30}"
+                current_keys.add(key)
+                tracker[key] = tracker.get(key, 0) + 1
+                if tracker[key] >= 2:
+                    validated_potholes.append((x1, y1, x2, y2, conf))
+
+            # 오래된 미감지 키 소멸 처리
+            for k in list(tracker.keys()):
+                if k not in current_keys:
+                    tracker[k] -= 1
+                    if tracker[k] <= 0:
+                        del tracker[k]
+
+            last_potholes = validated_potholes
+
+            # 4. 컴퓨터 비전 노면 수막(Flooding) 분석
+            puddles = analyze_water_ponding(frame, road_y_start)
+            last_floods = puddles
+
             latency_ms = int((time.time() - start_time) * 1000)
             global_state["latency"] = latency_ms
-            last_boxes = results.boxes
 
-        vehicle_count = 0
-        pothole_count = 0
-        flooding_count = 0
+        vehicle_count = len(last_vehicles)
+        pothole_count = len(last_potholes)
+        flooding_count = len(last_floods)
 
-        # 2. 검출된 객체 렌더링 (차량, 트럭, 버스 등)
-        for box in last_boxes:
-            cls_id = int(box.cls[0])
-            cls_name = yolo_model.names[cls_id]
-            conf = float(box.conf[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+        # 차량 렌더링 (에메랄드 그린)
+        for (coords, conf, cls_name) in last_vehicles:
+            x1, y1, x2, y2 = coords
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (16, 185, 129), 2)
+            cv2.putText(frame, f"{cls_name} {int(conf*100)}%", (x1, max(15, y1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (16, 185, 129), 1)
 
-            if "pothole" in cls_name.lower():
-                pothole_count += 1
-                draw_pothole_box(frame, x1, y1, x2, y2, conf)
-            elif "flood" in cls_name.lower() or "water" in cls_name.lower():
-                flooding_count += 1
-                draw_flood_polygon(frame, [(x1, y1), (x2, y1), (x2, y2), (x1, y2)], conf)
-            elif cls_name in ["car", "truck", "bus", "motorcycle"]:
-                vehicle_count += 1
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (16, 185, 129), 2)
-                label = f"{cls_name} {int(conf*100)}%"
-                cv2.putText(frame, label, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (16, 185, 129), 1)
+        # 실제 감지된 포트홀 렌더링
+        for (x1, y1, x2, y2, conf) in last_potholes:
+            draw_pothole_box(frame, x1, y1, x2, y2, conf)
 
-        # 3. 데모 위험 시뮬레이션 모드 활성화 시 (실제 CCTV에 포트홀/침수가 없을 때 UI 및 알림 테스트용)
+        # 실제 감지된 도로 침수(수막) 렌더링
+        for puddle_pts in last_floods:
+            draw_flood_polygon(frame, puddle_pts, 0.88)
+
+        # 데모 시뮬레이션 모드가 켜진 경우에만 가상 위험 박스 추가 렌더링
         if global_state["simulation_mode"]:
             sim_phase += 0.05
-            # 도로 1차선 하단에 포트홀 시뮬레이션 박스 렌더링
             px1, py1 = int(w * 0.28), int(h * 0.72)
             px2, py2 = int(w * 0.38), int(h * 0.82)
             pothole_conf = 0.82 + 0.08 * math.sin(sim_phase)
             draw_pothole_box(frame, px1, py1, px2, py2, pothole_conf)
             pothole_count += 1
 
-            # 도로 갓길/우측 차선에 도로 침수(수막) 시뮬레이션 영역 렌더링
             pts = np.array([
                 [int(w * 0.65), int(h * 0.60)],
                 [int(w * 0.88), int(h * 0.65)],
                 [int(w * 0.95), int(h * 0.85)],
                 [int(w * 0.68), int(h * 0.82)]
             ], np.int32)
-            flood_conf = 0.89 + 0.06 * math.cos(sim_phase)
-            draw_flood_polygon(frame, pts, flood_conf)
+            draw_flood_polygon(frame, pts, 0.91)
             flooding_count += 1
 
-        # 통계 갱신
+        # 관제 상태 갱신
         global_state["vehicles"] = vehicle_count
         global_state["potholes"] = pothole_count
         global_state["floodings"] = flooding_count
 
-        # 위험 이벤트 발생 시 로그 기록 (중복 방지: 50프레임마다 1회)
+        # 위험 감지 시 이벤트 로그 저장 (60프레임마다 1회)
         if (pothole_count > 0 or flooding_count > 0) and (frame_counter % 60 == 0):
             now_str = datetime.now().strftime("%H:%M:%S")
             if pothole_count > 0:
-                record_event(now_str, cctv_name, "POTHOLE", 0.86)
+                record_event(now_str, cctv_name, "POTHOLE", 0.88)
             if flooding_count > 0:
-                record_event(now_str, cctv_name, "FLOODING", 0.91)
+                record_event(now_str, cctv_name, "FLOODING", 0.92)
 
-        # 4. 화면 상단 정보 오버레이 (HUD 워터마크)
-        cv2.rectangle(frame, (10, 10), (320, 60), (15, 23, 42), -1)
-        cv2.rectangle(frame, (10, 10), (320, 60), (51, 65, 85), 1)
+        # 화면 상단 HUD 정보 워터마크
+        cv2.rectangle(frame, (10, 10), (340, 60), (15, 23, 42), -1)
+        cv2.rectangle(frame, (10, 10), (340, 60), (51, 65, 85), 1)
         cv2.putText(frame, f"CCTV: {cctv_name[:20]}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-        status_text = f"POTHOLES: {pothole_count} | FLOOD: {flooding_count} | {latency_ms}ms"
-        cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (6, 182, 212), 1)
+        mode_str = "DEMO SIM" if global_state["simulation_mode"] else "REAL AI"
+        status_text = f"[{mode_str}] POTHOLES: {pothole_count} | FLOOD: {flooding_count} | {latency_ms}ms"
+        cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (6, 182, 212), 1)
 
         # JPEG 인코딩
         _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
