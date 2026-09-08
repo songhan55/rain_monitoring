@@ -176,20 +176,27 @@
     <section class="lg:col-span-8 flex flex-col gap-6">
 
       <!-- 기상청 실시간 강수 관측 배너 (기상-CCTV 연계 트리거 표시기) -->
-      <div class="bg-gradient-to-r from-slate-900/90 via-blue-950/30 to-slate-900/90 border border-slate-800/90 rounded-2xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
+      <div class="bg-gradient-to-r from-slate-900/95 via-blue-950/40 to-slate-900/95 border border-cyan-500/30 rounded-2xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
         <div class="flex items-center gap-3.5">
-          <div id="weather-icon" class="w-11 h-11 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-2xl shadow-lg">
+          <div id="weather-icon" class="w-12 h-12 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-2xl shadow-lg">
             🌤️
           </div>
           <div>
             <div class="flex items-center gap-2">
-              <span class="text-xs font-bold text-slate-200">기상청 초단기실황 실시간 관측</span>
+              <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+                [<span id="weather-cctv-name" class="text-cyan-300 font-extrabold">CCTV 위치</span>] 현장 실시간 기상
+              </span>
               <span id="weather-badge" class="text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
                 🟢 정상 (강수 위험 없음)
               </span>
             </div>
-            <p class="text-xs text-slate-400 mt-0.5">
-              관측 시각: <span id="weather-time" class="font-mono text-slate-200">-</span> | 기상청 격자: <span id="weather-grid" class="font-mono text-cyan-400">-</span>
+            <p class="text-xs text-slate-400 mt-1 flex items-center gap-2 flex-wrap">
+              <span>📍 GPS: <span id="weather-coords" class="font-mono text-slate-300">-</span></span>
+              <span>•</span>
+              <span>기상청 격자: <span id="weather-grid" class="font-mono text-cyan-400">-</span></span>
+              <span>•</span>
+              <span>관측 시각: <span id="weather-time" class="font-mono text-slate-200">-</span></span>
             </p>
           </div>
         </div>
@@ -525,16 +532,20 @@
       // 비디오 스트림 URL 교체
       reloadStream();
 
-      // 기상청 실시간 기상 조회 호출
-      fetchWeather(parseFloat(currentCctv.coordy), parseFloat(currentCctv.coordx));
+      // 기상청 실시간 기상 조회 호출 (CCTV 이름과 위경도 좌표 함께 전달)
+      fetchWeather(parseFloat(currentCctv.coordy), parseFloat(currentCctv.coordx), currentCctv.cctvname);
     }
 
     // 기상청 초단기실황 날씨 조회 함수
-    async function fetchWeather(lat, lon) {
+    async function fetchWeather(lat, lon, cctvName) {
+      document.getElementById('weather-cctv-name').innerText = cctvName || '선택 지점';
+      document.getElementById('weather-coords').innerText = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+
       try {
-        const res = await fetch(`/api/weather?lat=${lat}&lon=${lon}`);
+        const res = await fetch(`/api/weather?lat=${lat}&lon=${lon}&name=${encodeURIComponent(cctvName || '')}`);
         const data = await res.json();
         if (data.success) {
+          document.getElementById('weather-cctv-name').innerText = data.cctv_name || cctvName;
           document.getElementById('weather-time').innerText = data.base_time;
           document.getElementById('weather-grid').innerText = `X:${data.nx}, Y:${data.ny}`;
           document.getElementById('weather-rn1').innerText = `${data.rn1} mm/h`;

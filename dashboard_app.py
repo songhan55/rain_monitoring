@@ -93,21 +93,15 @@ def get_cctvs():
 def get_weather():
     lat = float(request.args.get("lat", 37.40))
     lon = float(request.args.get("lon", 127.09))
+    cctv_name = request.args.get("name", "지정 위치")
 
     if not weather_client:
         return jsonify({"success": False, "msg": "Weather client not initialized"})
 
     try:
-        # 데모 시뮬레이션 모드일 때 가상 호우 상황 반환 옵션
+        # 선택된 CCTV의 위경도에 대한 기상청 실제 초단기실황 조회
         weather = weather_client.get_weather(lat, lon)
-        if global_state.get("simulation_mode"):
-            # 시뮬레이션 모드 시 비가 오는 상황(호우 주의)으로 데모 데이터 보강
-            weather["rn1"] = 18.5
-            weather["pty"] = 1
-            weather["pty_text"] = "집중 호우 🌧️ (데모 시뮬레이션)"
-            weather["is_raining"] = True
-            weather["rain_level"] = "WARNING"
-            weather["level_text"] = "🚨 호우 경보 발령 (침수 주의 관제 가동)"
+        weather["cctv_name"] = cctv_name
         return jsonify(weather)
     except Exception as e:
         print("Weather API error:", e)
