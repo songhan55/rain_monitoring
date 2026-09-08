@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 도로 위험(포트홀·침수) 실시간 관제 대시보드</title>
+  <!-- Tailwind CSS & Lucide Icons -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Leaflet Map CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    @keyframes pulse-ring {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+      70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    }
+    .hazard-pulse {
+      animation: pulse-ring 2s infinite;
+    }
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans">
+
+  <!-- 상단 네비게이션 헤더 -->
+  <header class="bg-slate-900/80 backdrop-blur border-b border-slate-800 px-6 py-3.5 flex items-center justify-between sticky top-0 z-50">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
+        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+          Rain Monitoring: 도로 위험 감지 AI 관제 시스템
+          <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1 font-normal">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+            LIVE STREAM
+          </span>
+        </h1>
+        <p class="text-xs text-slate-400">국가교통정보센터(ITS) 실시간 CCTV 연계 도로 포트홀 및 침수 탐지</p>
+      </div>
+    </div>
+
+    <!-- 우측 헤더 제어 버튼 -->
+    <div class="flex items-center gap-4">
+      <div class="flex items-center gap-2 bg-slate-800/80 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
+        <span class="text-slate-400">인증키 상태:</span>
+        <span class="text-cyan-400 font-mono font-medium">ITS-연결됨 (200 OK)</span>
+      </div>
+      <button id="btn-sound-toggle" onclick="toggleSound()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs flex items-center gap-1.5 transition">
+        <span id="sound-icon">🔔</span>
+        <span id="sound-text">경고음 ON</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- 메인 레이아웃 -->
+  <main class="flex-1 p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 max-w-[1920px] mx-auto w-full">
+
+    <!-- 좌측 사이드바: CCTV 선택 및 설정 컨트롤 (4 cols) -->
+    <section class="lg:col-span-4 flex flex-col gap-5">
+      
+      <!-- CCTV 선택 카드 -->
+      <div class="bg-slate-900/90 rounded-2xl p-5 border border-slate-800/80 shadow-xl">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+            <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+            CCTV 탐색 및 선택
+          </h2>
+          <span id="cctv-count-badge" class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300">0개 대기중</span>
+        </div>
+
+        <!-- 프리셋 지역 선택 -->
+        <div class="mb-3">
+          <label class="block text-xs text-slate-400 mb-1">권역 선택 (Bounding Box)</label>
+          <select id="select-preset" onchange="changePreset()" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
+            <option value="yongin_seoul">수도권 (용인서울·경부·판교 권역)</option>
+            <option value="seoul_gangnam">서울 강남 / 올림픽대로 권역</option>
+            <option value="gyeonggi_south">경기 남부 (수원·화성·오산)</option>
+            <option value="busan">부산 / 경남 고속도로 권역</option>
+          </select>
+        </div>
+
+        <!-- CCTV 검색 입력 -->
+        <div class="mb-3">
+          <label class="block text-xs text-slate-400 mb-1">CCTV 검색 (이름 필터)</label>
+          <input type="text" id="input-search" oninput="filterCctvList()" placeholder="예: 고기터널, 판교, 서분당..." class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 placeholder-slate-600">
+        </div>
+
+        <!-- CCTV 드롭다운 목록 -->
+        <div class="mb-4">
+          <label class="block text-xs text-slate-400 mb-1">모니터링 대상 CCTV</label>
+          <select id="select-cctv" onchange="selectCctv()" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 font-medium focus:outline-none focus:border-cyan-500">
+            <option value="">CCTV를 불러오는 중...</option>
+          </select>
+        </div>
+
+        <!-- 선택된 CCTV 정보 표시 카드 -->
+        <div class="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 text-xs space-y-1.5">
+          <div class="flex justify-between">
+            <span class="text-slate-400">지점명:</span>
+            <span id="info-name" class="text-white font-semibold">-</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">위도 / 경도:</span>
+            <span id="info-coord" class="text-cyan-400 font-mono">-</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-400">포맷 / 유형:</span>
+            <span id="info-format" class="text-slate-300">HLS Live Stream</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI 탐지 모델 & 제어 카드 -->
+      <div class="bg-slate-900/90 rounded-2xl p-5 border border-slate-800/80 shadow-xl flex-1 flex flex-col justify-between">
+        <div>
+          <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-4">
+            <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+            </svg>
+            AI 모델 추론 & 시뮬레이션 설정
+          </h2>
+
+          <!-- 감지 민감도 슬라이더 -->
+          <div class="mb-5">
+            <div class="flex justify-between text-xs mb-1.5">
+              <span class="text-slate-400">신뢰도 임계값 (Confidence)</span>
+              <span id="val-conf" class="text-cyan-400 font-bold font-mono">0.35</span>
+            </div>
+            <input type="range" id="slider-conf" min="0.1" max="0.9" step="0.05" value="0.35" oninput="updateConf(this.value)" class="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-500">
+            <p class="text-[11px] text-slate-500 mt-1">값을 낮추면 감지가 민감해지고, 높이면 오탐지가 줄어듭니다.</p>
+          </div>
+
+          <!-- 데모 위험 주입 시뮬레이션 버튼 -->
+          <div class="p-3.5 rounded-xl bg-gradient-to-r from-amber-500/10 to-orange-500/10 border border-amber-500/30 mb-4">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-xs font-semibold text-amber-300">💡 데모 위험(포트홀·침수) 주입 모드</p>
+                <p class="text-[11px] text-slate-400">맑은 날씨에도 관제 UI 경고 및 알림을 즉시 테스트합니다.</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" id="toggle-sim" onchange="toggleSimulation(this.checked)" class="sr-only peer" checked>
+                <div class="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500"></div>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- 미니 지도 위치 표시 카드 -->
+        <div>
+          <label class="block text-xs text-slate-400 mb-1.5 font-medium">CCTV 설치 지점 지도</label>
+          <div id="mini-map" class="h-44 rounded-xl border border-slate-800 z-0"></div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- 우측 메인 패널: 영상 스트림 & 실시간 관제 현황 (8 cols) -->
+    <section class="lg:col-span-8 flex flex-col gap-6">
+
+      <!-- 상단 핵심 메트릭 카드 4종 -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <!-- 포트홀 -->
+        <div class="bg-slate-900/90 border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between shadow-lg">
+          <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
+            <span>포트홀(노면파손)</span>
+            <span class="w-2 h-2 rounded-full bg-rose-500"></span>
+          </div>
+          <div class="mt-2 flex items-baseline gap-2">
+            <span id="stat-pothole" class="text-2xl font-black text-rose-400">0</span>
+            <span class="text-xs text-slate-400">구역 감지</span>
+          </div>
+        </div>
+
+        <!-- 도로 침수 -->
+        <div class="bg-slate-900/90 border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between shadow-lg">
+          <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
+            <span>도로 침수(수막)</span>
+            <span class="w-2 h-2 rounded-full bg-cyan-500"></span>
+          </div>
+          <div class="mt-2 flex items-baseline gap-2">
+            <span id="stat-flooding" class="text-2xl font-black text-cyan-400">0</span>
+            <span class="text-xs text-slate-400">구역 감지</span>
+          </div>
+        </div>
+
+        <!-- 통행 차량 -->
+        <div class="bg-slate-900/90 border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between shadow-lg">
+          <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
+            <span>통행 차량 감지</span>
+            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          </div>
+          <div class="mt-2 flex items-baseline gap-2">
+            <span id="stat-vehicles" class="text-2xl font-black text-emerald-400">0</span>
+            <span class="text-xs text-slate-400">대 주행중</span>
+          </div>
+        </div>
+
+        <!-- AI 추론 지연 시간 -->
+        <div class="bg-slate-900/90 border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between shadow-lg">
+          <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
+            <span>AI 추론 지연</span>
+            <span class="w-2 h-2 rounded-full bg-blue-500"></span>
+          </div>
+          <div class="mt-2 flex items-baseline gap-2">
+            <span id="stat-latency" class="text-2xl font-black text-blue-400">-</span>
+            <span class="text-xs text-slate-400">ms / frame</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 메인 실시간 비디오 뷰어 -->
+      <div class="bg-slate-900/90 border border-slate-800/80 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
+        <!-- 비디오 헤더 바 -->
+        <div class="bg-slate-950/80 px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
+              ● REC LIVE
+            </span>
+            <span id="stream-cctv-title" class="text-sm font-semibold text-white tracking-wide">CCTV 스트림 연결 대기중</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <span id="hazard-banner" class="hidden text-xs font-bold px-3 py-1 rounded-full bg-rose-500 text-white hazard-pulse">
+              🚨 도로 위험 감지됨!
+            </span>
+            <button onclick="reloadStream()" class="text-xs text-slate-400 hover:text-white px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 transition">
+              새로고침
+            </button>
+          </div>
+        </div>
+
+        <!-- 비디오 디스플레이 영역 -->
+        <div class="relative aspect-video bg-black flex items-center justify-center overflow-hidden">
+          <img id="video-stream" src="" alt="CCTV Stream" class="w-full h-full object-contain">
+          
+          <!-- 로딩 스피너 -->
+          <div id="video-loading" class="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 gap-3">
+            <div class="w-10 h-10 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin"></div>
+            <p class="text-xs text-slate-300">실시간 CCTV HLS 스트림을 디코딩하고 있습니다...</p>
+          </div>
+
+          <!-- 화면 위 위험 HUD 알림 오버레이 -->
+          <div id="hud-alert" class="hidden absolute top-4 left-4 right-4 bg-rose-600/90 backdrop-blur text-white px-4 py-2.5 rounded-xl border border-rose-400 flex items-center justify-between shadow-2xl transition">
+            <div class="flex items-center gap-2">
+              <span class="text-lg">⚠️</span>
+              <span id="hud-alert-msg" class="text-sm font-bold">전방 노면 파손(포트홀) 발생 감지</span>
+            </div>
+            <span class="text-xs bg-black/40 px-2 py-1 rounded">관제센터 자동 보고됨</span>
+          </div>
+        </div>
+
+        <!-- 스트림 하단 범례 -->
+        <div class="px-5 py-2.5 bg-slate-950/60 border-t border-slate-800 text-[11px] text-slate-400 flex flex-wrap items-center justify-between gap-2">
+          <div class="flex items-center gap-4">
+            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-rose-600 inline-block"></span> 포트홀(노면파손)</span>
+            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-cyan-600 inline-block"></span> 도로 침수(수막)</span>
+            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-emerald-500 inline-block"></span> 통행 차량</span>
+          </div>
+          <div>YOLOv8 + OpenCV HLS Realtime Ingestion Engine</div>
+        </div>
+      </div>
+
+      <!-- 실시간 위험 이벤트 발생 로그 테이블 -->
+      <div class="bg-slate-900/90 border border-slate-800/80 rounded-2xl p-5 shadow-xl flex-1 flex flex-col">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+            <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+            </svg>
+            실시간 위험 감지 이벤트 로그 (Real-time Event Logs)
+          </h2>
+          <button onclick="clearLogs()" class="text-xs text-slate-400 hover:text-slate-200">기록 지우기</button>
+        </div>
+
+        <div class="overflow-x-auto flex-1 max-h-52">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-950 text-slate-400 uppercase tracking-wider sticky top-0">
+              <tr>
+                <th class="py-2.5 px-3">발생 시각</th>
+                <th class="py-2.5 px-3">CCTV 지점</th>
+                <th class="py-2.5 px-3">위험 유형</th>
+                <th class="py-2.5 px-3">AI 신뢰도</th>
+                <th class="py-2.5 px-3">조치 상태</th>
+              </tr>
+            </thead>
+            <tbody id="log-table-body" class="divide-y divide-slate-800 text-slate-300">
+              <tr class="text-slate-500 text-center">
+                <td colspan="5" class="py-6">현재 감지된 위험 이벤트가 없습니다. 안전 운행 중입니다.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- 웹 오디오 API 경고음 발생기 -->
+  <script>
+    let soundEnabled = true;
+    let audioCtx = null;
+
+    function playAlertBeep() {
+      if (!soundEnabled) return;
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime(880, audioCtx.currentTime); // A5 note
+        osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.3);
+        gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.3);
+      } catch (e) {
+        console.error("Audio error:", e);
+      }
+    }
+
+    function toggleSound() {
+      soundEnabled = !soundEnabled;
+      document.getElementById('sound-icon').innerText = soundEnabled ? '🔔' : '🔕';
+      document.getElementById('sound-text').innerText = soundEnabled ? '경고음 ON' : '경고음 OFF';
+    }
+  </script>
+
+  <!-- 대시보드 메인 제어 스크립트 -->
+  <script>
+    let allCctvs = [];
+    let currentCctv = null;
+    let map = null;
+    let mapMarker = null;
+
+    // Leaflet 지도 초기화
+    function initMap() {
+      map = L.map('mini-map', { zoomControl: false }).setView([37.35, 127.06], 13);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap'
+      }).addTo(map);
+    }
+
+    // 프리셋 선택 시 CCTV 목록 갱신
+    async function changePreset() {
+      const preset = document.getElementById('select-preset').value;
+      const res = await fetch(`/api/cctvs?preset=${preset}`);
+      allCctvs = await res.json();
+      renderCctvDropdown(allCctvs);
+    }
+
+    // CCTV 드롭다운 렌더링
+    function renderCctvDropdown(cctvs) {
+      const select = document.getElementById('select-cctv');
+      select.innerHTML = '';
+      document.getElementById('cctv-count-badge').innerText = `${cctvs.length}개 검색됨`;
+
+      if (cctvs.length === 0) {
+        select.innerHTML = '<option value="">해당 권역에 CCTV가 없습니다</option>';
+        return;
+      }
+
+      cctvs.forEach((c, idx) => {
+        const opt = document.createElement('option');
+        opt.value = idx;
+        opt.innerText = `${c.cctvname}`;
+        select.appendChild(opt);
+      });
+
+      select.selectedIndex = 0;
+      selectCctv();
+    }
+
+    // 이름 검색 필터링
+    function filterCctvList() {
+      const query = document.getElementById('input-search').value.toLowerCase();
+      const filtered = allCctvs.filter(c => c.cctvname.toLowerCase().includes(query));
+      renderCctvDropdown(filtered);
+    }
+
+    // 특정 CCTV 선택 시 스트림 재생
+    function selectCctv() {
+      const select = document.getElementById('select-cctv');
+      const idx = select.value;
+      if (idx === '' || !allCctvs[idx]) return;
+
+      currentCctv = allCctvs[idx];
+
+      // 메타 정보 표시
+      document.getElementById('info-name').innerText = currentCctv.cctvname;
+      document.getElementById('info-coord').innerText = `${Number(currentCctv.coordy).toFixed(5)}, ${Number(currentCctv.coordx).toFixed(5)}`;
+      document.getElementById('stream-cctv-title').innerText = currentCctv.cctvname;
+
+      // 미니 지도 이동
+      if (map) {
+        const lat = parseFloat(currentCctv.coordy);
+        const lon = parseFloat(currentCctv.coordx);
+        map.setView([lat, lon], 14);
+        if (mapMarker) map.removeLayer(mapMarker);
+        mapMarker = L.circleMarker([lat, lon], {
+          radius: 8,
+          fillColor: "#06b6d4",
+          color: "#ffffff",
+          weight: 2,
+          opacity: 1,
+          fillOpacity: 0.8
+        }).addTo(map).bindPopup(currentCctv.cctvname).openPopup();
+      }
+
+      // 비디오 스트림 URL 교체
+      reloadStream();
+    }
+
+    function reloadStream() {
+      if (!currentCctv) return;
+      const img = document.getElementById('video-stream');
+      const spinner = document.getElementById('video-loading');
+      spinner.classList.remove('hidden');
+
+      const encodedUrl = encodeURIComponent(currentCctv.cctvurl);
+      const cctvName = encodeURIComponent(currentCctv.cctvname);
+      img.src = `/video_feed?url=${encodedUrl}&name=${cctvName}&t=${Date.now()}`;
+
+      img.onload = () => spinner.classList.add('hidden');
+    }
+
+    // 신뢰도 임계값 조절
+    async function updateConf(val) {
+      document.getElementById('val-conf').innerText = val;
+      await fetch(`/api/set_conf?conf=${val}`);
+    }
+
+    // 데모 시뮬레이션 모드 토글
+    async function toggleSimulation(enabled) {
+      await fetch(`/api/toggle_simulation?enabled=${enabled}`);
+    }
+
+    // 주기적 통계 및 로그 폴링 (1초마다)
+    let lastEventTime = null;
+    async function pollStats() {
+      try {
+        const res = await fetch('/api/stats');
+        const data = await res.json();
+
+        document.getElementById('stat-pothole').innerText = data.potholes;
+        document.getElementById('stat-flooding').innerText = data.floodings;
+        document.getElementById('stat-vehicles').innerText = data.vehicles;
+        document.getElementById('stat-latency').innerText = data.latency;
+
+        const banner = document.getElementById('hazard-banner');
+        const hud = document.getElementById('hud-alert');
+        const hudMsg = document.getElementById('hud-alert-msg');
+
+        if (data.potholes > 0 || data.floodings > 0) {
+          banner.classList.remove('hidden');
+          hud.classList.remove('hidden');
+
+          let msg = "";
+          if (data.potholes > 0 && data.floodings > 0) msg = "⚠️ 전방 포트홀 및 침수 구역 동시 발생!";
+          else if (data.potholes > 0) msg = `⚠️ 도로 노면 파손(포트홀 ${data.potholes}건) 감지됨`;
+          else if (data.floodings > 0) msg = `🌊 도로 침수(수막 형성 ${data.floodings}건) 감지됨`;
+
+          hudMsg.innerText = msg;
+          playAlertBeep();
+        } else {
+          banner.classList.add('hidden');
+          hud.classList.add('hidden');
+        }
+
+        // 로그 테이블 갱신
+        if (data.events && data.events.length > 0) {
+          const tbody = document.getElementById('log-table-body');
+          tbody.innerHTML = data.events.map(ev => `
+            <tr class="hover:bg-slate-800/50 transition">
+              <td class="py-2 px-3 font-mono text-slate-400">${ev.time}</td>
+              <td class="py-2 px-3 font-medium text-white">${ev.cctv}</td>
+              <td class="py-2 px-3">
+                <span class="px-2 py-0.5 rounded text-[11px] font-bold ${ev.type === 'POTHOLE' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40' : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/40'}">
+                  ${ev.type === 'POTHOLE' ? '🚨 포트홀' : '🌊 도로침수'}
+                </span>
+              </td>
+              <td class="py-2 px-3 font-mono text-cyan-300">${(ev.conf * 100).toFixed(1)}%</td>
+              <td class="py-2 px-3">
+                <span class="text-emerald-400 flex items-center gap-1 font-medium">● 관제전송</span>
+              </td>
+            </tr>
+          `).join('');
+        }
+      } catch (e) {
+        console.error("Poll error:", e);
+      }
+    }
+
+    function clearLogs() {
+      fetch('/api/clear_logs');
+      document.getElementById('log-table-body').innerHTML = '<tr class="text-slate-500 text-center"><td colspan="5" class="py-6">기록이 초기화되었습니다.</td></tr>';
+    }
+
+    // 초기 실행
+    window.addEventListener('DOMContentLoaded', () => {
+      initMap();
+      changePreset();
+      setInterval(pollStats, 1000);
+    });
+  </script>
+</body>
+</html>
