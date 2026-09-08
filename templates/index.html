@@ -175,6 +175,43 @@
     <!-- 우측 메인 패널: 영상 스트림 & 실시간 관제 현황 (8 cols) -->
     <section class="lg:col-span-8 flex flex-col gap-6">
 
+      <!-- 기상청 실시간 강수 관측 배너 (기상-CCTV 연계 트리거 표시기) -->
+      <div class="bg-gradient-to-r from-slate-900/90 via-blue-950/30 to-slate-900/90 border border-slate-800/90 rounded-2xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
+        <div class="flex items-center gap-3.5">
+          <div id="weather-icon" class="w-11 h-11 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-2xl shadow-lg">
+            🌤️
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-bold text-slate-200">기상청 초단기실황 실시간 관측</span>
+              <span id="weather-badge" class="text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                🟢 정상 (강수 위험 없음)
+              </span>
+            </div>
+            <p class="text-xs text-slate-400 mt-0.5">
+              관측 시각: <span id="weather-time" class="font-mono text-slate-200">-</span> | 기상청 격자: <span id="weather-grid" class="font-mono text-cyan-400">-</span>
+            </p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-5 text-xs">
+          <div class="text-right">
+            <span class="text-slate-400 block text-[11px]">1시간 강수량 (RN1)</span>
+            <span id="weather-rn1" class="text-base font-black text-cyan-400 font-mono">0.0 mm/h</span>
+          </div>
+          <div class="h-8 w-px bg-slate-800"></div>
+          <div class="text-right">
+            <span class="text-slate-400 block text-[11px]">강수 형태 (PTY)</span>
+            <span id="weather-pty" class="text-sm font-semibold text-white">강수 없음</span>
+          </div>
+          <div class="h-8 w-px bg-slate-800"></div>
+          <div class="text-right">
+            <span class="text-slate-400 block text-[11px]">기온 / 습도</span>
+            <span id="weather-temp" class="text-sm font-semibold text-slate-200">- ℃</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 상단 핵심 메트릭 카드 4종 -->
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <!-- 포트홀 -->
@@ -487,6 +524,41 @@
 
       // 비디오 스트림 URL 교체
       reloadStream();
+
+      // 기상청 실시간 기상 조회 호출
+      fetchWeather(parseFloat(currentCctv.coordy), parseFloat(currentCctv.coordx));
+    }
+
+    // 기상청 초단기실황 날씨 조회 함수
+    async function fetchWeather(lat, lon) {
+      try {
+        const res = await fetch(`/api/weather?lat=${lat}&lon=${lon}`);
+        const data = await res.json();
+        if (data.success) {
+          document.getElementById('weather-time').innerText = data.base_time;
+          document.getElementById('weather-grid').innerText = `X:${data.nx}, Y:${data.ny}`;
+          document.getElementById('weather-rn1').innerText = `${data.rn1} mm/h`;
+          document.getElementById('weather-pty').innerText = data.pty_text;
+          document.getElementById('weather-temp').innerText = `${data.temp}℃ / 습도 ${data.humidity}%`;
+
+          const badge = document.getElementById('weather-badge');
+          badge.innerText = data.level_text;
+          const icon = document.getElementById('weather-icon');
+
+          if (data.rain_level === "WARNING") {
+            badge.className = "text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse";
+            icon.innerText = "⛈️";
+          } else if (data.rain_level === "WATCH") {
+            badge.className = "text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40";
+            icon.innerText = "🌧️";
+          } else {
+            badge.className = "text-[11px] px-2.5 py-0.5 rounded-full font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40";
+            icon.innerText = "🌤️";
+          }
+        }
+      } catch (e) {
+        console.error("Weather fetch error:", e);
+      }
     }
 
     function reloadStream() {

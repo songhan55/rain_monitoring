@@ -14,14 +14,21 @@ from flask import Flask, render_template, Response, request, jsonify
 from ultralytics import YOLO
 
 from cctv_client import ITSCCTVClient
+from weather_client import KMAWeatherClient
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
 app = Flask(__name__)
 
-# CCTV 클라이언트 초기화
+# CCTV 및 기상청 클라이언트 초기화
 cctv_client = ITSCCTVClient()
+try:
+    weather_client = KMAWeatherClient()
+    print("🌤️ 기상청 API 클라이언트 초기화 완료")
+except Exception as e:
+    weather_client = None
+    print("⚠️ 기상청 클라이언트 초기화 오류:", e)
 
 # YOLO 모델 로드 (커스텀 가중치 우선 검색)
 CUSTOM_WEIGHTS = "best.pt"
@@ -80,6 +87,31 @@ def get_cctvs():
     except Exception as e:
         print("CCTV fetch error:", e)
         return jsonify([])
+
+
+@app.route("/api/weather")
+def get_weather():
+    lat = float(request.args.get("lat", 37.40))
+    lon = float(request.args.get("lon", 127.09))
+
+    if not weather_client:
+        return jsonify({"success": False, "msg": "Weather client not initialized"})
+
+    try:
+        # 데모 시뮬레이션 모드일 때 가상 호우 상황 반환 옵션
+        weather = weather_client.get_weather(lat, lon)
+        if global_state.get("simulation_mode"):
+            # 시뮬레이션 모드 시 비가 오는 상황(호우 주의)으로 데모 데이터 보강
+            weather["rn1"] = 18.5
+            weather["pty"] = 1
+            weather["pty_text"] = "집중 호우 🌧️ (데모 시뮬레이션)"
+            weather["is_raining"] = True
+            weather["rain_level"] = "WARNING"
+            weather["level_text"] = "🚨 호우 경보 발령 (침수 주의 관제 가동)"
+        return jsonify(weather)
+    except Exception as e:
+        print("Weather API error:", e)
+        return jsonify({"success": False, "error": str(e)})
 
 
 @app.route("/api/stats")
