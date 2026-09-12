@@ -239,28 +239,40 @@ def generate_frames(stream_url: str, cctv_name: str):
         h, w, _ = frame.shape
         road_y_start = int(h * 0.40)  # 화면 하단 60% 도로 ROI
 
-        # 3프레임마다 1번만 AI 추론 수행 (부드러운 FPS 유지)
-        if frame_counter % 3 == 0:
+        # 4프레임마다 1번만 AI 추론 수행 (CPU 최적화 초고속 FPS 유지)
+        if frame_counter % 4 == 0:
             start_time = time.time()
 
-            # 1. 차량 통행량 감지 (YOLOv8n)
-            traffic_res = yolo_traffic(frame, conf=0.35, verbose=False)[0]
+            # 1. 차량 통행량 감지 (YOLOv8n, imgsz=320 경량 고속 추론)
+            traffic_res = yolo_traffic(frame, imgsz=320, conf=0.35, verbose=False)[0]
             last_vehicles = [
-                (map(int, box.xyxy[0].tolist()), float(box.conf[0]), yolo_traffic.names[int(box.cls[0])])
+                (list(map(int, box.xyxy[0].tolist())), float(box.conf[0]), yolo_traffic.names[int(box.cls[0])])
                 for box in traffic_res.boxes
                 if yolo_traffic.names[int(box.cls[0])] in ["car", "truck", "bus", "motorcycle"]
             ]
 
-            # 2. 실제 포트홀 전문 세그멘테이션 추론 (pothole_best.pt)
-            pothole_res = yolo_pothole(frame, conf=global_state["conf_threshold"], verbose=False)[0]
+            # 2. 원거리/저화질 CCTV 노면 디테일 향상 (적응형 히스토그램 평활화 CLAHE)
+            # 도로 노면 부분(road_roi)에 CLAHE를 적용하여 어둡거나 흐릿한 포트홀/크랙 대비 극대화
+            pothole_input = frame.copy()
+            try:
+                lab = cv2.cvtColor(pothole_input[road_y_start:h, :], cv2.COLOR_BGR2LAB)
+                clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+                pothole_input[road_y_start:h, :] = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            except Exception:
+                pass
+
+            pothole_res = yolo_pothole(pothole_input, imgsz=320, conf=global_state["conf_threshold"], verbose=False)[0]
             current_pothole_candidates = []
             if pothole_res.boxes is not None and len(pothole_res.boxes) > 0:
                 for box in pothole_res.boxes:
                     conf = float(box.conf[0])
-                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                    # 도로 하단 영역에 위치하는지 검증
-                    if y2 > road_y_start:
-                        current_pothole_candidates.append((x1, y1, x2, y2, conf))
+                    coords = list(map(int, box.xyxy[0].tolist()))
+                    if len(coords) == 4:
+                        x1, y1, x2, y2 = coords
+                        # 도로 하단 영역에 위치하는지 검증
+                        if y2 > road_y_start:
+                            current_pothole_candidates.append((x1, y1, x2, y2, conf))
 
             # 3. 시간적 연속성 필터링 (Temporal Consistency Filter)
             # 도로 노면 파손은 고정되어 있으므로, 동일 좌표 영역에서 2프레임 이상 유지될 때만 확정
@@ -298,10 +310,13 @@ def generate_frames(stream_url: str, cctv_name: str):
 
         # 차량 렌더링 (에메랄드 그린)
         for (coords, conf, cls_name) in last_vehicles:
-            x1, y1, x2, y2 = coords
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (16, 185, 129), 2)
-            cv2.putText(frame, f"{cls_name} {int(conf*100)}%", (x1, max(15, y1 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (16, 185, 129), 1)
+            try:
+                x1, y1, x2, y2 = coords
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (16, 185, 129), 2)
+                cv2.putText(frame, f"{cls_name} {int(conf*100)}%", (x1, max(15, y1 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (16, 185, 129), 1)
+            except Exception:
+                pass
 
         # 실제 감지된 포트홀 렌더링
         for (x1, y1, x2, y2, conf) in last_potholes:
@@ -374,18 +389,25 @@ def draw_pothole_box(frame, x1, y1, x2, y2, conf):
 
 def draw_flood_polygon(frame, pts, conf):
     """도로 침수/수막 영역(투명 사이언 블루 다각형 마스크) 렌더링"""
-    overlay = frame.copy()
-    if isinstance(pts, list):
-        pts = np.array(pts, np.int32)
-    cv2.fillPoly(overlay, [pts], (214, 182, 6))  # BGR
-    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+    try:
+        pts = np.asarray(pts, dtype=np.int32)
+        if pts.ndim == 3 and pts.shape[1] == 1:
+            pts = pts.reshape(-1, 2)
+        elif pts.ndim == 1:
+            return
 
-    cv2.polylines(frame, [pts], True, (255, 215, 0), 2)
-    # 대표 지점 라벨 표시
-    center_x = int(np.mean(pts[:, 0]))
-    center_y = int(np.mean(pts[:, 1]))
-    label = f"FLOODING {int(conf*100)}%"
-    cv2.putText(frame, label, (center_x - 40, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 2)
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [pts], (214, 182, 6))  # BGR
+        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+
+        cv2.polylines(frame, [pts], True, (255, 215, 0), 2)
+        # 대표 지점 라벨 표시
+        center_x = int(np.mean(pts[:, 0]))
+        center_y = int(np.mean(pts[:, 1]))
+        label = f"FLOODING {int(conf*100)}%"
+        cv2.putText(frame, label, (center_x - 40, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 2)
+    except Exception as e:
+        pass
 
 
 def record_event(time_str, cctv_name, hazard_type, conf):
